@@ -147,7 +147,6 @@ const AdminDashboard = () => {
 
       if (analysisError) {
         console.error('❌ Error obteniendo análisis:', analysisError);
-      } else {
       }
 
       // Obtener análisis recientes (últimos 7 días) - Filtrar por analysis_date

@@ -224,7 +224,7 @@ const Verification = () => {
       }
 
       // Clean the value: remove spaces and currency symbols
-      let cleanValue = value.trim().replace(/\s/g, '').replace(/[€$£¥]/g, '');
+      const cleanValue = value.trim().replace(/\s/g, '').replace(/[€$£¥]/g, '');
       
       // Check for valid monetary format with point as decimal separator
       // Allow: 123, 123.45, 1234.56, etc.
@@ -397,7 +397,7 @@ const Verification = () => {
     if (!value || value.trim() === '') return null;
     
     // Remove currency symbols and spaces
-    let cleanValue = value
+    const cleanValue = value
       .toString()
       .trim()
       .replace(/[€$\s]/g, ''); // Remove currency symbols and spaces

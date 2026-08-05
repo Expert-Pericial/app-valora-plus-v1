@@ -128,7 +128,7 @@ const AdminWorkshopAnalyses = () => {
       return;
     }
 
-    let query = (supabase as any)
+    const query = (supabase as any)
       .from("analysis")
       .select(SELECT_COLUMNS as any, { count: "exact" })
       .in("user_id", userIds)
