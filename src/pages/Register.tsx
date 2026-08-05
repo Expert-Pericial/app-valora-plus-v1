@@ -92,7 +92,7 @@ const Register = () => {
       errors.push('Debe contener al menos un número');
     }
     
-    if (!/[!@#$%^&*(),.?":{}|<>\-]/.test(password)) {
+    if (!/[!@#$%^&*(),.?":{}|<>-]/.test(password)) {
       errors.push('Debe contener al menos un carácter especial (!@#$%^&*(),.?":{}|<>-)');
     }
     
@@ -141,8 +141,8 @@ const Register = () => {
     }
 
     // Validar formato de teléfono (básico)
-    const phoneRegex = /^[\+]?[1-9][\d]{0,15}$/;
-    if (!phoneRegex.test(phone.replace(/[\s\-\(\)]/g, ''))) {
+    const phoneRegex = /^[+]?[1-9][\d]{0,15}$/;
+    if (!phoneRegex.test(phone.replace(/[\s\-()]/g, ''))) {
       toast({
         title: "Teléfono inválido",
         description: "Por favor, introduce un número de teléfono válido",
