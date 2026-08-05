@@ -1,0 +1,34 @@
+name: CI
+
+# Valida cada push a main y cada PR: lint + build de producción.
+# Si el build o el lint fallan, el check sale en rojo en el PR / pestaña Actions.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Lint & build (web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        # `npm install` (no `npm ci`): el lockfile se genera en Windows y no
+        # incluye dependencias opcionales solo-Linux (@emnapi/*, binarios nativos
+        # de Vite/Tailwind). `npm ci` exige sincronía exacta y fallaría en el
+        # runner Linux; `npm install` las resuelve sin romper el build.
+        run: npm install --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
