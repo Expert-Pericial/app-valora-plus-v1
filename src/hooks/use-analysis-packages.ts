@@ -36,11 +36,14 @@ export const useAnalysisPackages = () => {
         throw settingError;
       }
 
-      const basePrice = settingData as number;
+      // get_system_setting devuelve JSONB: {"value": 25.00, "currency": "EUR"}, en euros.
+      // total_price está en céntimos (así lo pasa payment-session a Stripe como
+      // unit_amount), así que hay que convertir el precio base antes de comparar.
+      const basePriceInCents = Number((settingData as { value?: number } | null)?.value ?? 0) * 100;
 
       // Calcular ahorros y formatear precios
       const packagesWithSavings: PackageWithSavings[] = (packagesData as AnalysisPackage[]).map(pkg => {
-        const regularPrice = pkg.analyses_count * basePrice;
+        const regularPrice = pkg.analyses_count * basePriceInCents;
         const savings = regularPrice - pkg.total_price;
         
         return {

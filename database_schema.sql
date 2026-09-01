@@ -3287,6 +3287,138 @@ ADD COLUMN IF NOT EXISTS package_id UUID;
 -- Ademas consumiria saldo de los usuarios al recargar sus analisis historicos.
 ALTER TABLE analysis DISABLE TRIGGER trigger_analysis_count_increment;
 
+-- Source: 20260806_fix_analysis_and_packages_rls.sql
+-- (va aqui y no en su orden cronologico porque depende de analysis.user_id, que
+--  solo existe a partir del ALTER TABLE de reconciliacion de mas arriba)
+-- Arreglar los dos 42501 de la seccion de analisis.
+--
+-- 1) get_active_packages() devolvia 403 "permission denied for table users".
+--    La politica de admin de analysis_packages consulta auth.users, tabla sobre la
+--    que anon/authenticated no tienen SELECT. Al ser FOR ALL tambien se evalua en
+--    los SELECT que hace la funcion (que no es SECURITY DEFINER), asi que la
+--    lectura entera abortaba. Mismo bug que ya se corrigio para workshops en
+--    20241016_fix_all_rls_policies.sql: comprobar el rol via auth.jwt().
+--
+-- 2) El INSERT en analysis devolvia 403 "new row violates row-level security
+--    policy". Las politicas de 20241019_create_analysis_table.sql solo aceptan
+--    filas cuyo workshop_id pertenezca al taller del perfil, pero el esquema
+--    cambio despues: workshop_id es NULLABLE y se anadio analysis.user_id NOT NULL.
+--    Para un usuario sin taller el WITH CHECK evalua NULL IN (...) -> NULL, y RLS
+--    rechaza. Se anaden politicas por user_id que se suman (OR) a las existentes
+--    por taller.
+
+DROP POLICY IF EXISTS "Admins can manage analysis packages" ON analysis_packages;
+DROP POLICY IF EXISTS "Admins can manage analysis packages v2" ON analysis_packages;
+
+CREATE POLICY "Admins can manage analysis packages v2" ON analysis_packages
+    FOR ALL USING (
+        (auth.jwt() ->> 'user_metadata')::jsonb ->> 'role' = 'admin'
+        OR
+        (auth.jwt() ->> 'raw_user_meta_data')::jsonb ->> 'role' = 'admin'
+    );
+
+DROP POLICY IF EXISTS "Users can view their own analysis" ON analysis;
+CREATE POLICY "Users can view their own analysis" ON analysis
+    FOR SELECT USING (user_id = auth.uid());
+
+DROP POLICY IF EXISTS "Users can insert their own analysis" ON analysis;
+CREATE POLICY "Users can insert their own analysis" ON analysis
+    FOR INSERT WITH CHECK (
+        user_id = auth.uid()
+        AND (
+            workshop_id IS NULL
+            OR workshop_id IN (SELECT workshop_id FROM profiles WHERE id = auth.uid())
+        )
+    );
+
+DROP POLICY IF EXISTS "Users can update their own analysis" ON analysis;
+CREATE POLICY "Users can update their own analysis" ON analysis
+    FOR UPDATE USING (user_id = auth.uid())
+    WITH CHECK (
+        user_id = auth.uid()
+        AND (
+            workshop_id IS NULL
+            OR workshop_id IN (SELECT workshop_id FROM profiles WHERE id = auth.uid())
+        )
+    );
+
+-- Source: 20260806_fix_extracted_data_rls.sql
+-- (va aqui por la misma razon: depende de analysis.user_id)
+--
+-- Las politicas de vehicle_data e insurance_amounts (20241020_create_extracted_data_tables.sql)
+-- filtran por analysis_id IN (SELECT id FROM analysis WHERE workshop_id = auth.uid()),
+-- es decir, comparan un uuid de taller con un uuid de usuario: nunca es cierto.
+-- El cliente escribe en las dos tablas con la sesion del usuario en ambas rutas del
+-- flujo (NewAnalysis.tsx:232/:270 y el fallback de IA en :670/:707) y tambien las
+-- lee/actualiza en Verification.tsx y Results.tsx, asi que el guardado de los datos
+-- extraidos fallaba con 42501 aunque el INSERT en analysis ya funcione.
+
+DROP POLICY IF EXISTS "Users can view their own vehicle data v2" ON vehicle_data;
+CREATE POLICY "Users can view their own vehicle data v2" ON vehicle_data
+    FOR SELECT USING (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    );
+
+DROP POLICY IF EXISTS "Users can insert their own vehicle data v2" ON vehicle_data;
+CREATE POLICY "Users can insert their own vehicle data v2" ON vehicle_data
+    FOR INSERT WITH CHECK (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    );
+
+DROP POLICY IF EXISTS "Users can update their own vehicle data v2" ON vehicle_data;
+CREATE POLICY "Users can update their own vehicle data v2" ON vehicle_data
+    FOR UPDATE USING (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    )
+    WITH CHECK (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    );
+
+DROP POLICY IF EXISTS "Users can view their own insurance amounts v2" ON insurance_amounts;
+CREATE POLICY "Users can view their own insurance amounts v2" ON insurance_amounts
+    FOR SELECT USING (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    );
+
+DROP POLICY IF EXISTS "Users can insert their own insurance amounts v2" ON insurance_amounts;
+CREATE POLICY "Users can insert their own insurance amounts v2" ON insurance_amounts
+    FOR INSERT WITH CHECK (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    );
+
+DROP POLICY IF EXISTS "Users can update their own insurance amounts v2" ON insurance_amounts;
+CREATE POLICY "Users can update their own insurance amounts v2" ON insurance_amounts
+    FOR UPDATE USING (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    )
+    WITH CHECK (
+        analysis_id IN (SELECT id FROM analysis WHERE user_id = auth.uid())
+    );
+
+-- Desactivar los paquetes de ejemplo que sembro 20250123_create_analysis_packages.sql.
+-- Estan en euros (total_price 15.00, 142.50, 675.00, 1275.00, 6000.00) mientras que
+-- los paquetes reales del export estan en centimos (Pack Individual = 1000 = 10 EUR), y
+-- payment-session/index.ts:140 pasa total_price tal cual a Stripe como unit_amount:
+-- cobrarian 0,15 EUR, 1,43 EUR, etc.
+UPDATE analysis_packages
+SET is_active = false
+WHERE name IN (
+    'Análisis Individual',
+    'Paquete Básico',
+    'Paquete Estándar',
+    'Paquete Premium',
+    'Paquete Empresarial'
+);
+
+-- Source: 20260807_add_error_message_to_analysis.sql
+-- NewAnalysis.tsx:175-178 marca el analisis como 'failed' escribiendo tambien
+-- error_message, columna que nunca existio (42703), asi que el PATCH entero se
+-- rechazaba con 400 y los analisis fallidos se quedaban en 'processing'.
+ALTER TABLE analysis
+ADD COLUMN IF NOT EXISTS error_message TEXT;
+
+COMMENT ON COLUMN analysis.error_message IS 'Mensaje del error que hizo fallar el analisis; lo rellena el manejador de errores del frontend al marcar status = failed';
+
 -- Data for workshops
 INSERT INTO public."workshops" ("id", "name", "email", "phone", "address", "created_at", "updated_at") VALUES ('c378f51e-ec17-42b6-be0d-142865116848', 'Taller Velasco', 'juanvelasco9888@gmail.com', NULL, NULL, '2025-10-22T20:07:30.48556+00:00', '2025-10-22T20:07:30.48556+00:00') ON CONFLICT DO NOTHING;
 INSERT INTO public."workshops" ("id", "name", "email", "phone", "address", "created_at", "updated_at") VALUES ('e38941f8-5061-4114-8a2e-cb26f8e1b855', 'talle ubeda', 'info@expertpericial.com', '677161401', NULL, '2025-10-24T11:58:23.111412+00:00', '2025-10-24T11:58:23.111412+00:00') ON CONFLICT DO NOTHING;

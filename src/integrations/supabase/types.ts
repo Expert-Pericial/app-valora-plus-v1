@@ -38,6 +38,7 @@ export type Database = {
         Row: {
           analysis_date: string
           created_at: string | null
+          error_message: string | null
           id: string
           pdf_filename: string | null
           pdf_url: string | null
@@ -50,6 +51,7 @@ export type Database = {
         Insert: {
           analysis_date?: string
           created_at?: string | null
+          error_message?: string | null
           id?: string
           pdf_filename?: string | null
           pdf_url?: string | null
@@ -62,6 +64,7 @@ export type Database = {
         Update: {
           analysis_date?: string
           created_at?: string | null
+          error_message?: string | null
           id?: string
           pdf_filename?: string | null
           pdf_url?: string | null
