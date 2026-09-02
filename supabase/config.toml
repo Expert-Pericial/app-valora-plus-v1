@@ -1,4 +1,7 @@
-project_id = "your-project-id"
+project_id = "rygxfjsxvejrgymbxcfw"
+
+[functions.openai-chat]
+verify_jwt = true
 
 [functions.get-next-analysis-cost]
 verify_jwt = true
