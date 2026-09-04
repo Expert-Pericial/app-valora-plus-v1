@@ -170,7 +170,9 @@ const PaymentSuccess = () => {
               <div>
                 <span className="text-muted-foreground">Estado:</span>
                 <p className="font-medium text-success">
-                  {paymentDetails.status === 'succeeded' ? 'Completado' : paymentDetails.status}
+                  {paymentDetails.status === 'completed' || paymentDetails.status === 'succeeded'
+                    ? 'Completado'
+                    : paymentDetails.status}
                 </p>
               </div>
               <div>

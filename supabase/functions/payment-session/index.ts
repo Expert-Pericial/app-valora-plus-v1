@@ -25,21 +25,33 @@ serve(async (req) => {
       }
     )
 
+    // Cliente con service role SOLO para escribir en `payments`. Las politicas RLS
+    // de esa tabla no permiten INSERT al rol `authenticated`, asi que el insert con
+    // la anon key siempre falla y el webhook se queda sin fila que actualizar.
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    )
+
     // Get request body first
     const body = await req.json()
-    const { amount, currency = 'eur', description = 'Payment', package_id, analyses_count, user_id } = body
+    const { amount, currency = 'eur', description = 'Payment', package_id, analyses_count } = body
 
-    // Get the user from the request or from body
-    let user = null
-    if (req.headers.get('Authorization')) {
-      const {
-        data: { user: authUser },
-      } = await supabaseClient.auth.getUser()
-      user = authUser
-    } else if (user_id) {
-      // When no JWT, accept user_id from body (for testing)
-      user = { id: user_id }
+    // El JWT es la unica fuente de identidad: aceptar un user_id del body permitiria
+    // crear sesiones de pago a nombre de cualquier usuario.
+    if (!req.headers.get('Authorization')) {
+      return new Response(
+        JSON.stringify({ error: 'Missing Authorization header' }),
+        {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      )
     }
+
+    const {
+      data: { user },
+    } = await supabaseClient.auth.getUser()
 
     if (!user) {
       return new Response(
@@ -105,6 +117,18 @@ serve(async (req) => {
       )
     }
 
+    // payments.workshop_id es NOT NULL y referencia workshops(id): sin taller el
+    // INSERT violaria la FK. Mejor cortar aqui que cobrar y no poder registrarlo.
+    if (!profile.workshop_id) {
+      return new Response(
+        JSON.stringify({ error: 'El usuario no tiene un taller asignado; no se puede registrar el pago.' }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      )
+    }
+
     // Initialize Stripe
     const stripe = new (await import('https://esm.sh/stripe@14.21.0')).default(
       Deno.env.get('STRIPE_SECRET_KEY') ?? '',
@@ -125,6 +149,13 @@ serve(async (req) => {
     // Add session_id parameter to URLs so Stripe can send it back
     const successUrl = `${baseSuccessUrl}?session_id={CHECKOUT_SESSION_ID}`
     const cancelUrl = `${baseCancelUrl}?session_id={CHECKOUT_SESSION_ID}`
+
+    // Calculate unit price (already in cents from database)
+    const unitPriceCents = packageData
+      ? Math.round(Number(packageData.price_per_analysis))
+      : Math.round(finalAmount)
+
+    const analysisMonth = new Date().toISOString().slice(0, 7) // YYYY-MM
 
     // Create Stripe checkout session
     const session = await stripe.checkout.sessions.create({
@@ -148,30 +179,30 @@ serve(async (req) => {
       customer_email: user.email,
       metadata: {
         user_id: user.id,
-        workshop_id: profile.workshop_id || '',
+        workshop_id: profile.workshop_id,
         description: finalDescription,
         package_id: package_id || '',
         analyses_count: finalAnalysesCount.toString(),
+        unit_price_cents: unitPriceCents.toString(),
+        amount_cents: Math.round(finalAmount).toString(),
+        currency: currency,
+        analysis_month: analysisMonth,
       },
     })
 
-    // Calculate unit price (already in cents from database)
-    const unitPriceCents = packageData 
-      ? Math.round(Number(packageData.price_per_analysis))
-      : Math.round(finalAmount)
-
-    // Store payment record
-    const { error: paymentError } = await supabaseClient
+    // Store payment record. Con service role para saltar RLS: sin esta fila el
+    // webhook no tiene nada que marcar como pagado y el balance nunca se acredita.
+    const { error: paymentError } = await supabaseAdmin
       .from('payments')
       .insert({
         user_id: user.id,
-        workshop_id: profile.workshop_id || '00000000-0000-0000-0000-000000000000', // Default UUID if no workshop
+        workshop_id: profile.workshop_id,
         stripe_session_id: session.id,
         stripe_payment_intent_id: session.payment_intent || session.id, // Use session.id as fallback
         amount_cents: Math.round(finalAmount), // Already in cents from database
         currency: currency,
         status: 'pending',
-        analysis_month: new Date().toISOString().slice(0, 7), // YYYY-MM format
+        analysis_month: analysisMonth,
         analyses_purchased: finalAnalysesCount,
         unit_price_cents: unitPriceCents,
         description: finalDescription,
@@ -179,8 +210,19 @@ serve(async (req) => {
       })
 
     if (paymentError) {
+      // Fallar en cerrado: es mejor un pago que no arranca que uno cobrado y sin
+      // registrar. No devolvemos la URL, asi que el usuario nunca llega a pagar.
       console.error('Error storing payment record:', paymentError)
-      // Continue anyway, as the Stripe session was created successfully
+      return new Response(
+        JSON.stringify({
+          error: 'No se pudo registrar el pago; no se ha iniciado el cobro.',
+          details: paymentError.message,
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      )
     }
 
     return new Response(

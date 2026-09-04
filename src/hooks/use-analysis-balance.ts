@@ -56,9 +56,9 @@ export const useAnalysisBalance = () => {
           freeAnalysesLimit: usageData.free_analyses_limit || 3,
           remainingFreeAnalyses: usageData.remaining_free_analyses || 0,
           
-          // Análisis pagados
+          // Análisis pagados (totales históricos, no del mes en curso)
           paidAnalysesAvailable: usageData.remaining_paid_analyses || 0,
-          paidAnalysesUsed: usageData.paid_analyses_count || 0,
+          paidAnalysesUsed: usageData.total_paid_analyses_used || 0,
           totalPaidAnalysesPurchased: usageData.total_paid_analyses || 0,
           
           // Totales

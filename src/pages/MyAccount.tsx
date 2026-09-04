@@ -546,13 +546,21 @@ const MyAccount = () => {
                   {/* Análisis gratuitos */}
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm">
-                      <span>Análisis gratuitos</span>
-                      <span>{Math.round((analysisBalance.freeAnalysesUsed / analysisBalance.freeAnalysesLimit) * 100)}%</span>
+                      <span>Análisis gratuitos usados</span>
+                      <span>
+                        {analysisBalance.freeAnalysesLimit > 0
+                          ? `${Math.round((analysisBalance.freeAnalysesUsed / analysisBalance.freeAnalysesLimit) * 100)}%`
+                          : '—'}
+                      </span>
                     </div>
                     <div className="w-full bg-secondary rounded-full h-2">
                       <div 
-                        className="bg-primary h-2 rounded-full transition-all duration-300" 
-                        style={{ width: `${(analysisBalance.freeAnalysesUsed / analysisBalance.freeAnalysesLimit) * 100}%` }}
+                        className="bg-primary h-2 rounded-full transition-all duration-300"
+                        style={{
+                          width: analysisBalance.freeAnalysesLimit > 0
+                            ? `${Math.min(100, (analysisBalance.freeAnalysesUsed / analysisBalance.freeAnalysesLimit) * 100)}%`
+                            : '0%'
+                        }}
                       ></div>
                     </div>
                     <div className="text-xs text-muted-foreground">
@@ -585,13 +593,17 @@ const MyAccount = () => {
                     </div>
                   </div>
 
-                  {/* Información de pago pendiente o paquetes para admin_mechanic */}
-                  {profile?.role === 'admin_mechanic' && analysisBalance.totalAnalysesAvailable === 0 && (
+                  {/* Compra de paquetes para admin_mechanic. Siempre disponible: antes
+                      solo aparecia con el saldo a 0, asi que no habia forma de comprar
+                      por adelantado ni de probar el flujo de pago teniendo gratuitos. */}
+                  {profile?.role === 'admin_mechanic' && (
                     <div className="space-y-2 pt-2 border-t">
-                      <div className="flex justify-between text-sm">
-                        <span>Análisis disponibles</span>
-                        <span className="text-destructive font-medium">0 análisis</span>
-                      </div>
+                      {analysisBalance.totalAnalysesAvailable === 0 && (
+                        <div className="flex justify-between text-sm">
+                          <span>Análisis disponibles</span>
+                          <span className="text-destructive font-medium">0 análisis</span>
+                        </div>
+                      )}
                       <div className="bg-blue-50 dark:bg-blue-950/20 p-3 rounded-lg border border-blue-200 dark:border-blue-800">
                         <div className="flex items-center gap-2 text-blue-800 dark:text-blue-200 mb-2">
                           <Crown className="h-4 w-4" />
@@ -626,13 +638,21 @@ const MyAccount = () => {
                   {/* Fallback al sistema anterior */}
                   <div className="space-y-2">
                     <div className="flex justify-between text-sm">
-                      <span>Análisis gratuitos</span>
-                      <span>{Math.round((userData.monthlyUsage / userData.maxUsage) * 100)}%</span>
+                      <span>Análisis gratuitos usados</span>
+                      <span>
+                        {userData.maxUsage > 0
+                          ? `${Math.round((userData.monthlyUsage / userData.maxUsage) * 100)}%`
+                          : '—'}
+                      </span>
                     </div>
                     <div className="w-full bg-secondary rounded-full h-2">
-                      <div 
-                        className="bg-primary h-2 rounded-full transition-all duration-300" 
-                        style={{ width: `${(userData.monthlyUsage / userData.maxUsage) * 100}%` }}
+                      <div
+                        className="bg-primary h-2 rounded-full transition-all duration-300"
+                        style={{
+                          width: userData.maxUsage > 0
+                            ? `${Math.min(100, (userData.monthlyUsage / userData.maxUsage) * 100)}%`
+                            : '0%'
+                        }}
                       ></div>
                     </div>
                     <div className="text-xs text-muted-foreground">

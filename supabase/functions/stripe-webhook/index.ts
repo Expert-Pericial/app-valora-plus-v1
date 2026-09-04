@@ -116,28 +116,32 @@ serve(async (req: any) => {
         
         // Get payment method and calculate fees
         const paymentMethod = session.payment_method_types?.[0] || 'card'
-        
-        // Get payment intent details to calculate fees
-        let stripeFee = 0
-        let netAmount = 0
-        
+
+        const paymentIntentId = typeof session.payment_intent === 'string'
+          ? session.payment_intent
+          : session.payment_intent.id
+
+        // null (no 0) para que el COALESCE del RPC deje el valor previo intacto si
+        // no conseguimos leer la comision, en vez de escribir ceros falsos.
+        let stripeFee: number | null = null
+        let netAmount: number | null = null
+
         if (session.payment_intent) {
           try {
+            // La API 2023-10-16 ya no expone paymentIntent.charges: la comisión viaja
+            // en latest_charge.balance_transaction, y hay que pedirla expandida.
             const paymentIntent = await stripe.paymentIntents.retrieve(
-              typeof session.payment_intent === 'string' 
-                ? session.payment_intent 
-                : session.payment_intent.id
+              paymentIntentId,
+              { expand: ['latest_charge.balance_transaction'] }
             )
-            
-            if (paymentIntent.charges?.data?.[0]) {
-              const charge = paymentIntent.charges.data[0]
-              stripeFee = charge.balance_transaction 
-                ? (await stripe.balanceTransactions.retrieve(
-                    typeof charge.balance_transaction === 'string'
-                      ? charge.balance_transaction
-                      : charge.balance_transaction.id
-                  )).fee
-                : 0
+
+            const charge = paymentIntent.latest_charge as any
+            const balanceTransaction = charge?.balance_transaction
+
+            if (balanceTransaction) {
+              stripeFee = typeof balanceTransaction === 'string'
+                ? (await stripe.balanceTransactions.retrieve(balanceTransaction)).fee
+                : balanceTransaction.fee
               netAmount = (paymentIntent.amount || 0) - stripeFee
             }
           } catch (feeError) {
@@ -153,35 +157,95 @@ serve(async (req: any) => {
           payment_method_param: paymentMethod,
           stripe_fee_cents_param: stripeFee,
           net_amount_cents_param: netAmount,
-          stripe_customer_id_param: customerId
+          stripe_customer_id_param: customerId,
+          stripe_payment_intent_id_param: paymentIntentId
         }
 
         console.log('🔄 Calling update_payment_status with params:', updateParams)
-        
-        const { data: updateResult, error: updateError } = await supabaseClient.rpc('update_payment_status', updateParams)
 
-        if (updateError) {
-          console.error('❌ Error updating payment status:', updateError)
-          console.error('📋 Update params were:', updateParams)
-          console.error('🔍 Error details:', {
-            message: updateError.message,
-            details: updateError.details,
-            hint: updateError.hint,
-            code: updateError.code
-          })
-          throw updateError
+        const markCompleted = async () => {
+          const { data, error } = await supabaseClient.rpc('update_payment_status', updateParams)
+
+          if (error) {
+            console.error('❌ Error updating payment status:', error)
+            console.error('📋 Update params were:', updateParams)
+            console.error('🔍 Error details:', {
+              message: error.message,
+              details: error.details,
+              hint: error.hint,
+              code: error.code
+            })
+            throw error
+          }
+
+          // El RPC devuelve (NULL, NULL) sin error cuando el UPDATE no encuentra
+          // la fila, asi que hay que inspeccionar el resultado.
+          const row = Array.isArray(data) ? data[0] : data
+          return row?.payment_id ? row : null
         }
 
-        console.log('✅ Payment completed successfully:', session.payment_intent, 'Session ID:', session.id, 'Customer ID:', session.customer)
+        let updateResult = await markCompleted()
+
+        if (!updateResult) {
+          // No existe la fila de `payments` para esta sesion (p.ej. el insert de
+          // payment-session fallo). El pago ya esta cobrado, asi que la
+          // reconstruimos desde los metadatos de la sesion y reintentamos.
+          console.error('⚠️ No payment row found for session, self-healing from metadata:', session.id)
+
+          const meta = session.metadata ?? {}
+
+          if (!meta.user_id || !meta.workshop_id) {
+            throw new Error(
+              `No payment row for session ${session.id} and metadata is incomplete ` +
+              `(user_id=${meta.user_id}, workshop_id=${meta.workshop_id}). Manual reconciliation required.`
+            )
+          }
+
+          const analysesCount = parseInt(meta.analyses_count ?? '1', 10) || 1
+          const amountCents = parseInt(meta.amount_cents ?? '', 10) || session.amount_total || 0
+
+          const { error: insertError } = await supabaseClient
+            .from('payments')
+            .insert({
+              user_id: meta.user_id,
+              workshop_id: meta.workshop_id,
+              stripe_session_id: session.id,
+              stripe_payment_intent_id: paymentIntentId,
+              amount_cents: amountCents,
+              currency: meta.currency || session.currency || 'eur',
+              status: 'pending', // 'pending' a proposito: el trigger de balance
+              // solo se dispara en la transicion pending -> completed.
+              analysis_month: meta.analysis_month || new Date().toISOString().slice(0, 7),
+              analyses_purchased: analysesCount,
+              unit_price_cents: parseInt(meta.unit_price_cents ?? '', 10) || Math.round(amountCents / analysesCount),
+              description: meta.description || 'Pago reconstruido desde Stripe',
+              package_id: meta.package_id || null,
+            })
+
+          if (insertError) {
+            console.error('❌ Self-healing insert failed:', insertError)
+            throw insertError
+          }
+
+          console.log('🩹 Payment row rebuilt from metadata, retrying status update')
+
+          updateResult = await markCompleted()
+
+          if (!updateResult) {
+            throw new Error(`Payment row rebuilt but status update still found no row for session ${session.id}`)
+          }
+        }
+
+        console.log('✅ Payment completed successfully:', paymentIntentId, 'Session ID:', session.id, 'Customer ID:', customerId)
         console.log('📊 Update result:', updateResult)
-        
+
         // ✨ SIMPLIFIED WEBHOOK: El trigger automático se encarga del balance
         // Ya no necesitamos manejar manualmente el balance aquí
         // El trigger 'trigger_payment_completion_add_balance' se ejecutará automáticamente
         // cuando el status del payment cambie a 'completed' en la función update_payment_status
-        
+
         console.log('🎯 Payment status updated to completed. Trigger will handle balance automatically.')
-        
+
         break
       }
 

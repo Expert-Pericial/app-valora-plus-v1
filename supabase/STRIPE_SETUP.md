@@ -1,105 +1,148 @@
 # Configuración de Stripe para Valora Plus
 
-## Configuración inicial
+Proyecto Supabase: `rygxfjsxvejrgymbxcfw`
 
-### 1. Configurar variables de entorno en Supabase
+## 1. Secretos de las Edge Functions
 
-Ejecuta los siguientes comandos en tu terminal para configurar las variables de entorno:
+`SUPABASE_URL` y `SUPABASE_SERVICE_ROLE_KEY` los inyecta Supabase automáticamente
+(el prefijo `SUPABASE_` está reservado). Solo hay que dar de alta los de Stripe.
 
-```bash
-# Configurar la clave secreta de Stripe
-supabase secrets set STRIPE_SECRET_KEY=sk_test_tu_clave_secreta_aqui
+El fichero `.env` de la raíz **no llega a las Edge Functions**: solo alimenta el
+bundle de Vite. Los secretos del webhook viven exclusivamente en Supabase.
 
-# Configurar el webhook secret de Stripe
-supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_tu_webhook_secret_aqui
+Crea `supabase/secrets.env.local` (ignorado por git) con:
+
+```
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
 ```
 
-### 2. Desplegar las Edge Functions
+Y súbelos:
 
-```bash
-# Desplegar todas las funciones
-supabase functions deploy create-payment-session
-supabase functions deploy stripe-webhook
-supabase functions deploy get-next-analysis-cost
+```powershell
+supabase secrets set --env-file supabase/secrets.env.local --project-ref rygxfjsxvejrgymbxcfw
+supabase secrets list --project-ref rygxfjsxvejrgymbxcfw
 ```
 
-### 3. Configurar webhooks en Stripe Dashboard
+> PowerShell usa backtick (`` ` ``) como continuación de línea, no `\`.
 
-1. Ve a tu dashboard de Stripe: https://dashboard.stripe.com/webhooks
-2. Crea un nuevo webhook endpoint con la URL: `https://tu-proyecto.supabase.co/functions/v1/stripe-webhook`
-3. Selecciona los siguientes eventos:
-   - `checkout.session.completed`
-   - `checkout.session.expired`
-   - `payment_intent.succeeded`
-   - `payment_intent.payment_failed`
-4. Copia el webhook secret y configúralo con el comando de arriba
+## 2. Desplegar las Edge Functions
 
-### 4. Configurar las claves en la aplicación
+```powershell
+supabase functions deploy payment-session stripe-webhook get-next-analysis-cost --project-ref rygxfjsxvejrgymbxcfw
+```
 
-En el panel de administración de la aplicación:
+Los secretos se leen al arrancar la función: **si los cambias, hay que redesplegar.**
 
-1. Ve a la sección "Sistema de Pagos"
-2. Activa "Habilitar Facturación"
-3. Activa "Habilitar Stripe"
-4. Configura la clave pública de Stripe en la base de datos:
+`verify_jwt` está fijado en `config.toml`. `stripe-webhook` va con `false`
+(Stripe no manda JWT de Supabase) y `payment-session` con `true` (crea cobros a
+nombre del usuario autenticado).
+
+## 3. Endpoint del webhook en Stripe
+
+URL:
+
+```
+https://rygxfjsxvejrgymbxcfw.supabase.co/functions/v1/stripe-webhook
+```
+
+**No es `valora.plus`.** Ese dominio sirve la SPA estática (`try_files ... /index.html`),
+así que un POST devolvería el HTML del index con un 200 y Stripe daría el evento
+por entregado mientras el pago no se procesa.
+
+Dashboard → Developers → Webhooks → Add endpoint, con **estos tres eventos y no más**:
+
+- `checkout.session.completed`
+- `checkout.session.expired`
+- `payment_intent.payment_failed`
+
+No añadas `payment_intent.succeeded` ni `charge.succeeded`: duplican el primero y
+se retiraron a propósito (ver `20250121_webhook_simplification.sql`). Cualquier otro
+evento cae en el `default` del `switch` y solo genera ruido en los logs.
+
+El payload debe ser el **snapshot** (objeto completo): el handler lee
+`event.data.object` como una `Checkout.Session` entera. Con payload *thin* no funciona.
+
+Copia el *Signing secret* (`whsec_...`) al paso 1 y redespliega.
+
+### Test y live no pueden convivir
+
+Solo hay un proyecto de Supabase y `STRIPE_WEBHOOK_SECRET` guarda un único valor.
+Cada modo de Stripe emite su propio `whsec_`, así que el destino del modo que no
+coincida fallará la verificación de firma con 400. Valida en test, y al pasar a
+live cambia `STRIPE_SECRET_KEY` y `STRIPE_WEBHOOK_SECRET`, y desactiva el destino de test.
+
+## 4. URLs de retorno
+
+`payment-session` lee `stripe_success_url` / `stripe_cancel_url` de `system_settings`
+y les añade `?session_id={CHECKOUT_SESSION_ID}`. Si están vacías cae al `origin` de
+la petición, que en producción puede no ser el dominio correcto.
 
 ```sql
-UPDATE system_settings 
-SET setting_value = '{"value": "pk_test_tu_clave_publica_aqui"}'
-WHERE setting_key = 'stripe_publishable_key';
-```
-
-### 5. Configurar precios
-
-Configura el precio de análisis adicionales:
-
-```sql
-UPDATE system_settings 
-SET setting_value = '{"value": 25.00}'
-WHERE setting_key = 'additional_analysis_price';
+SELECT stripe_success_url, stripe_cancel_url FROM system_settings;
 ```
 
 ## Flujo de pago
 
-1. El usuario intenta crear un análisis cuando ya no tiene análisis gratuitos
-2. Se muestra un modal de pago con el costo
-3. Al hacer clic en "Pagar", se llama a la función `create-payment-session`
-4. Se redirige al usuario a Stripe Checkout
-5. Después del pago, Stripe envía un webhook a `stripe-webhook`
-6. El webhook actualiza el estado del pago en la base de datos
-7. El usuario es redirigido de vuelta a la aplicación
+1. El usuario se queda sin análisis disponibles (gratuitos + pagados).
+2. `NewAnalysis` abre el modal de paquetes; `MyAccount` ofrece "Ver Paquetes" a `admin_mechanic`.
+3. El frontend llama a **`payment-session`** con `package_id`.
+4. Esa función crea la Checkout Session e **inserta la fila en `payments`** con
+   `status = 'pending'` usando service role. Si el insert falla, devuelve 500 y no
+   entrega la URL: mejor un pago que no arranca que uno cobrado sin registrar.
+5. Se redirige al usuario a Stripe Checkout.
+6. Stripe envía `checkout.session.completed` a **`stripe-webhook`**.
+7. El webhook llama a `update_payment_status`, que localiza el pago por
+   `stripe_session_id`, lo pasa a `completed` y persiste el `payment_intent` real.
+   Si no encuentra la fila, la reconstruye desde `session.metadata` y reintenta.
+8. El trigger `trigger_payment_completion_add_balance` ejecuta `add_paid_analyses`
+   en la transición `pending → completed`, acreditando el saldo. Es idempotente:
+   los reintentos de Stripe no duplican análisis.
+9. El usuario vuelve a `/payment-success`.
 
-## Funciones Edge disponibles
+## Funciones Edge
 
-### create-payment-session
-- **Propósito**: Crear una sesión de pago en Stripe
-- **Parámetros**: `{ amount: number, description?: string }`
-- **Retorna**: `{ url: string, session_id: string, payment_intent_id: string }`
-
-### stripe-webhook
-- **Propósito**: Manejar webhooks de Stripe
-- **Eventos soportados**: 
-  - `checkout.session.completed`
-  - `checkout.session.expired`
-  - `payment_intent.succeeded`
-  - `payment_intent.payment_failed`
-
-### get-next-analysis-cost
-- **Propósito**: Obtener el costo del próximo análisis
-- **Retorna**: `{ cost: number, is_free: boolean, billing_enabled: boolean }`
+| Función | verify_jwt | Propósito |
+|---|---|---|
+| `payment-session` | true | Crea la Checkout Session y la fila de `payments`. La que usa el frontend. |
+| `stripe-webhook` | false | Procesa los eventos de Stripe y cierra el pago. |
+| `get-next-analysis-cost` | true | Devuelve el coste del próximo análisis. |
+| `create-payment-session` | true | **Sin usar.** Variante antigua que fija `analyses_purchased = 1` y no acepta `package_id`. |
 
 ## Pruebas
 
-Para probar en modo desarrollo:
+Con las claves de test, tarjeta `4242 4242 4242 4242` (cualquier fecha futura y CVC).
+Para pagos fallidos, `4000 0000 0000 0002`.
 
-1. Usa las claves de test de Stripe (empiezan con `sk_test_` y `pk_test_`)
-2. Usa números de tarjeta de prueba: https://stripe.com/docs/testing#cards
-3. Revisa los logs de las Edge Functions: `supabase functions logs`
+Para llegar al modal de compra teniendo gratuitos, baja el límite temporalmente:
 
-## Producción
+```sql
+UPDATE system_settings SET setting_value = '{"value": 0}'
+WHERE setting_key = 'monthly_free_analyses_limit';
+```
 
-Para producción:
+Verificación tras pagar:
 
-1. Cambia a las claves de producción de Stripe
-2. Configura el webhook con la URL de producción
-3. Actualiza las variables de entorno con las claves de producción
+```sql
+SELECT status, stripe_session_id, stripe_payment_intent_id, stripe_fee_cents, net_amount_cents
+FROM payments ORDER BY created_at DESC LIMIT 1;
+
+SELECT remaining_analyses, total_purchased, purchase_history
+FROM user_paid_analyses_balance WHERE user_id = '<uuid>';
+```
+
+`status` debe ser `completed`, el intent empezar por `pi_` y las comisiones traer
+valores reales. En Stripe el evento debe figurar con **200** y una sola entrega.
+
+Logs:
+
+```powershell
+supabase functions logs stripe-webhook --project-ref rygxfjsxvejrgymbxcfw
+```
+
+Los `RAISE LOG` del trigger salen en **Database → Logs**, no en los de la función.
+
+El Stripe CLI (`stripe listen`) solo sirve si está logueado en la misma cuenta que
+la `sk_` configurada; si no, escucha eventos de otra cuenta. Evita
+`stripe trigger checkout.session.completed`: fabrica una sesión sintética que no
+existe en `payments`, así que solo ejercita la rama de autocuración.

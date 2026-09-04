@@ -10,7 +10,8 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.payment-session]
-verify_jwt = false
+# Crea cobros a nombre del usuario autenticado: el JWT es obligatorio.
+verify_jwt = true
 
 [functions.get-payment-history]
 verify_jwt = true
